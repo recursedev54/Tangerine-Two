@@ -1,0 +1,209 @@
+import os
+import json
+import random
+import math
+import nltk
+import tkinter as tk
+from tkinter import simpledialog, scrolledtext, ttk
+from tkinter import messagebox
+from nltk.sentiment.vader import SentimentIntensityAnalyzer
+from transformers import BertTokenizer, BertForSequenceClassification
+import torch
+
+# Download VADER lexicon if not already done
+nltk.download('vader_lexicon')
+
+# Initialize the sentiment intensity analyzer
+sid = SentimentIntensityAnalyzer()
+
+# Load pre-trained BERT tokenizer and model
+tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
+model = BertForSequenceClassification.from_pretrained('bert-base-uncased', num_labels=5)
+
+# Define emotion labels
+emotion_labels = ['Tangerine', 'Lime', 'Tangerine', 'Lime', 'Tangerine', 'Lime']
+
+# Preprocess the corpus text
+def preprocess_corpus(corpus):
+    return corpus.lower().replace('"','').replace("'",'').replace('\n',' ').replace(')','').replace('(','').replace('[','').replace(']','').replace('’','').replace("“",'').replace("”",'')
+
+# Calculate Shannon entropy
+def shannon_entropy(word_counts):
+    total_count = sum(word_counts.values())
+    entropy = 0
+    for count in word_counts.values():
+        probability = count / total_count
+        entropy -= probability * math.log2(probability)
+    return entropy
+
+# Adjust word probabilities based on sentiment score
+def adjust_probabilities(word_probabilities, sentiment_score, sentiment_weight=1.0):
+    adjusted_probabilities = {}
+    for word, probability in word_probabilities.items():
+        word_sentiment = sid.polarity_scores(word)['compound']
+        adjustment = sentiment_score['compound'] * word_sentiment * sentiment_weight
+        adjusted_probabilities[word] = probability * (1 + adjustment)
+    total_probability = sum(adjusted_probabilities.values())
+    for word in adjusted_probabilities:
+        adjusted_probabilities[word] /= total_probability
+    return adjusted_probabilities
+
+# Generate a response based on the user input and the n-gram model
+def generate_response(user_input, ngram, corpus, window_size, sentiment_weight=1.0):
+    out = ''
+    combined_corpus = user_input + ' ' + corpus
+    combined_corpus = preprocess_corpus(combined_corpus)
+    tokens = combined_corpus.split()
+    for i in range(len(tokens) - window_size):
+        word_pair = tuple(tokens[i:i+window_size])
+        if '' in word_pair:
+            continue
+        next_word = tokens[i+window_size]
+        ngram.setdefault(word_pair, []).append(next_word)
+    
+    entropy_scores = {}
+    for word_pair, next_words in ngram.items():
+        next_word_counts = {}
+        for word in next_words:
+            next_word_counts[word] = next_word_counts.get(word, 0) + 1
+        entropy_scores[word_pair] = shannon_entropy(next_word_counts)
+    
+    sorted_word_pairs = sorted(entropy_scores, key=entropy_scores.get, reverse=True)
+    high_entropy_word_pairs = sorted_word_pairs[:10]
+    chosen_word_pair = random.choice(high_entropy_word_pairs)
+    out = ' '.join(chosen_word_pair)
+    
+    sentiment_score = sid.polarity_scores(user_input)
+    print(f"Input Sentiment: {sentiment_score}")
+
+    while len(out.split()) < len(user_input.split()):
+        if chosen_word_pair not in ngram.keys():
+            break
+        next_word_options = ngram[chosen_word_pair]
+        next_word_counts = {word: next_word_options.count(word) for word in set(next_word_options)}
+        total_counts = sum(next_word_counts.values())
+        word_probabilities = {word: count / total_counts for word, count in next_word_counts.items()}
+        adjusted_probabilities = adjust_probabilities(word_probabilities, sentiment_score, sentiment_weight)
+        next_word = random.choices(list(adjusted_probabilities.keys()), weights=adjusted_probabilities.values(), k=1)[0]
+        out += ' ' + next_word
+        chosen_word_pair = (chosen_word_pair[1], next_word)
+    
+    output_sentiment = sid.polarity_scores(out)
+    print(f"Output Sentiment: {output_sentiment}")
+
+    # Perform emotion detection using BERT
+    inputs = tokenizer(out, return_tensors='pt', truncation=True, padding=True)
+    outputs = model(**inputs)
+    probabilities = torch.softmax(outputs.logits, dim=1).detach().numpy()[0]
+
+    # Get the predicted emotion
+    emotion_predictions = {emotion_labels[i]: prob for i, prob in enumerate(probabilities)}
+    
+    return out, sentiment_score, output_sentiment, emotion_predictions
+
+class CorpusApp:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("How Do You Feel, Tangerine?")
+        self.root.attributes('-fullscreen', True)
+        self.root.configure(bg='#ff4700')
+
+        self.ngram = {}
+        self.window_size = 2
+        self.corpus = (
+            'Image 1: "parents got confused n chose tangerine daughter 🔥🔥"\n'
+            'Image 2: "Can you buy me more tangerines?" "Seriously" "Yes 😔" "I bought you two bags on Wednesday." "I eated them :(" "Fine." "Yay!"\n'
+            'Image 3: "Mum I\'m out of tangerines" "You\'re joking" "No" "I got more yesterday" 😔\n'
+            'Image 4: "I\'m hungry" "There\'s food in the fridge" "Tangerine 😏" "No." 😋\n'
+            'Image 5: "I\'m at the store" "How many bags do you want" "How many do they have" "I\'m getting you three." 😔\n'
+            'Image 6: "Where are you" "Work" "No you aren\'t" "You\'re shopping" "Can you get tangerines" "Fine."\n'
+            'Image 7: "We\'re out of tangerines" "I\'m putting a limit" "You get two bags a month" "WHAT"\n'
+            'Image 8: "I\'m having withdrawals" "What??" "What are you taking??" "Tangerine 😢😢😢" "Oh my god." "I\'m not buying you more." 😓\n'
+            'Image 9: "Why are there tangerines in the kitchen" "I walked to the store" "You walked?" "Yeah" "It\'s three miles away" "Yeah" "I give up." 🍊\n'
+        )
+
+        self.tabControl = ttk.Notebook(root)
+        self.tab1 = ttk.Frame(self.tabControl, style="TFrame")
+        self.tab2 = ttk.Frame(self.tabControl, style="TFrame")
+        self.tab3 = ttk.Frame(self.tabControl, style="TFrame")
+        self.tabControl.add(self.tab1, text='Chat')
+        self.tabControl.add(self.tab2, text='Corpus')
+        self.tabControl.add(self.tab3, text='Pool')
+        self.tabControl.pack(expand=1, fill="both")
+
+        style = ttk.Style()
+        style.configure("TFrame", background='#ff4700')
+        style.configure("TLabel", background='#ff4700', foreground='white')
+        style.configure("TButton", background='#ff4700', foreground='white')
+
+        # Chat tab
+        self.chat_box = scrolledtext.ScrolledText(self.tab1, wrap=tk.WORD, font=("Helvetica", 16), fg="white", bg="#ff4700")
+        self.chat_box.pack(expand=True, fill='both')
+        
+        self.user_input = tk.Entry(self.tab1, font=("Helvetica", 16), fg="white", bg="#ff4700")
+        self.user_input.pack(fill='x', side='bottom')
+        self.user_input.bind("<Return>", self.get_response)
+        
+        self.root.bind("<Escape>", self.exit_fullscreen)
+        self.chat_box.insert(tk.END, "Tangerine: How do you feel, Limey?\n")
+        self.chat_box.configure(state='disabled')
+
+        # Corpus tab
+        self.corpus_text = scrolledtext.ScrolledText(self.tab2, wrap=tk.WORD, font=("Helvetica", 16), fg="white", bg="#ff4700")
+        self.corpus_text.insert(tk.END, self.corpus)
+        self.corpus_text.pack(expand=True, fill='both')
+        
+        self.save_button = tk.Button(self.tab2, text="Save Corpus", command=self.save_corpus, bg='#ff4700', fg='white')
+        self.save_button.pack()
+        
+        self.load_button = tk.Button(self.tab2, text="Load Corpus", command=self.load_corpus, bg='#ff4700', fg='white')
+        self.load_button.pack()
+
+        # Pool tab
+        self.pool_text = scrolledtext.ScrolledText(self.tab3, wrap=tk.WORD, font=("Helvetica", 16), fg="white", bg="#ff4700")
+        self.pool_text.insert(tk.END, self.corpus)
+        self.pool_text.pack(expand=True, fill='both')
+
+    def get_response(self, event):
+        user_input = self.user_input.get()
+        self.chat_box.configure(state='normal')
+        self.chat_box.insert(tk.END, f"You: {user_input}\n")
+        
+        response, input_sentiment, output_sentiment, emotion_predictions = generate_response(user_input, self.ngram, self.corpus, self.window_size, sentiment_weight=2.0)
+        
+        self.chat_box.insert(tk.END, f"Tangerine: {response}\n")
+        self.chat_box.insert(tk.END, f"You: {input_sentiment}\n")
+        self.chat_box.insert(tk.END, f"Them: {output_sentiment}\n")
+        self.chat_box.insert(tk.END, "Diff:\n")
+        for emotion, prob in emotion_predictions.items():
+            self.chat_box.insert(tk.END, f"{emotion}: {prob:.4f}\n")
+        self.chat_box.configure(state='disabled')
+        self.user_input.delete(0, tk.END)
+    
+    def load_corpus(self):
+        self.corpus = self.corpus_text.get(1.0, tk.END).strip()
+        self.pool_text.delete(1.0, tk.END)
+        self.pool_text.insert(tk.END, self.corpus)
+        self.chat_box.configure(state='normal')
+        self.chat_box.insert(tk.END, "OSS: Corpus loaded successfully.\n")
+        self.chat_box.configure(state='disabled')
+
+    def save_corpus(self):
+        file_name = simpledialog.askstring("Save Corpus", "Enter the file name to save the corpus:")
+        if file_name:
+            try:
+                with open(file_name + ".txt", 'w', encoding='utf-8') as file:
+                    file.write(self.corpus_text.get(1.0, tk.END).strip())
+                    self.chat_box.configure(state='normal')
+                    self.chat_box.insert(tk.END, "OSS: Corpus saved successfully.\n")
+                    self.chat_box.configure(state='disabled')
+            except Exception as e:
+                messagebox.showerror("Error", f"Failed to save corpus: {e}")
+
+    def exit_fullscreen(self, event):
+        self.root.destroy()
+
+if __name__ == "__main__":
+    root = tk.Tk()
+    app = CorpusApp(root)
+    root.mainloop()
